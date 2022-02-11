@@ -1,0 +1,589 @@
+---
+title: "2 kaggle"
+author: "nbidenko"
+date: "22 12 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(mice)
+library(VIM)
+library (ggplot2)
+library (stats)
+library(tidymodels)
+library(stringr)
+library(rsample)
+library(fastDummies)
+library(dplyr)
+library (readr)
+library(parsnip)
+library(tidymodels)
+library(caret)
+```
+
+Ссылка на соревнование: "https://www.kaggle.com/c/credit-default-prediction-ai-big-data/overview"
+
+Я его выбрал, так как захотел попрактиковаться в классификации. 
+
+```{r}
+loans = read_csv("~/3 курс/pervoe sorevnovanie/2/train.csv")
+loans$Id[1] = "zero"
+n = colnames (loans)
+n
+#названия колонок в исходном сете ненормальные - исправляю
+n = c("ID", "Home_Ownership", "Annual_Income","Years_current_job", "Tax_Liens", "Number_Open_Accounts", "Years_Credit_History","Maximum_Open_Credit","Number_Credit_Problems","Months_since_last_delinquent", "Bankruptcies","Purpose","Term","Current_Loan_Amount","Current_Credit_Balance","Monthly_Debt","Credit_Score","Credit_Default")
+colnames(loans) = n
+loans[,1] = rownames(loans)
+loans$Current_Credit_Balance = as.numeric(loans$Current_Credit_Balance)
+loans$Current_Loan_Amount = as.numeric(loans$Current_Loan_Amount)
+loans$Monthly_Debt = as.numeric(loans$Monthly_Debt)
+loans$ID = as.numeric(loans$ID)
+```
+Смотрим на пропуски в данных. 
+```{r}
+for (i in 2:ncol(loans)){
+n = sum(is.na(loans[,i]))
+if (n != 0)
+{print (names(loans)[i])
+print (n)}
+}
+most_freq <- function(x) {
+uniqx <- unique(na.omit(x))
+uniqx[which.max(tabulate(match(x, uniqx)))]
+}
+```
+Заменяю пропуски по категориям с небольшим их количетсвом самым частым значением. 
+```{r}
+loans$Bankruptcies = str_replace_na(loans$Bankruptcies, replacement = most_freq(loans$Bankruptcies))
+loans$Purpose = str_replace_na(loans$Purpose, replacement = most_freq(loans$Purpose))
+loans$Term = str_replace_na(loans$Term, replacement = most_freq(loans$Term))
+loans$Current_Loan_Amount = str_replace_na(loans$Current_Loan_Amount, replacement = most_freq(loans$Current_Loan_Amount))
+loans$Current_Credit_Balance = str_replace_na(loans$Current_Credit_Balance, replacement = most_freq(loans$Current_Credit_Balance))
+loans$Monthly_Debt = str_replace_na(loans$Monthly_Debt, replacement = most_freq(loans$Monthly_Debt))
+loans$Credit_Default = str_replace_na(loans$Credit_Default, replacement = most_freq(loans$Credit_Default))
+```
+
+Не буду исключать переменную Months_since_last_delinquent, так как без нее предскзание хуже, чем при импьютинге.
+```{r}
+ggplot () + geom_histogram(aes(x = loans$Months_since_last_delinquent))
+```
+Занимаюсь импьютингом. 
+```{r}
+B <- is.na(loans)
+B[,-10] <- T
+B[,-10] <- F
+fp_imputes = mice(loans, m = 4, seed =112, maxit = 25, method = "cart", where = B)
+t = fp_imputes$imp$Months_since_last_delinquent
+ggplot () + geom_histogram(aes(x = loans$Months_since_last_delinquent)) + geom_histogram(aes(x = t$`3`), fill = "red", alpha = 0.3)
+```
+3 вариант лучше всего всего по похожести распределения с имеющимися данными. 
+```{r}
+#функция complete все еще не работает
+dbb = loans %>% filter (rownames(loans)%in% rownames(t))
+dbb$Months_since_last_delinquent = t$`3`
+loans = anti_join(loans,dbb, by = "ID")
+loans = rbind(loans, dbb)
+loans = loans %>% arrange(ID)
+rm(dbb, t, fp_imputes)
+loans$Current_Credit_Balance = as.numeric(loans$Current_Credit_Balance)
+loans$Current_Loan_Amount = as.numeric(loans$Current_Loan_Amount)
+loans$Monthly_Debt = as.numeric(loans$Monthly_Debt)
+loans$ID = as.numeric(loans$ID)
+```
+
+Остатки пропусков я решил заполнить при помощи нормального распределения, созданного на основе переменной. 
+```{r}
+mean(na.omit(loans$Months_since_last_delinquent))
+sd(na.omit(loans$Months_since_last_delinquent))
+set.seed(987)
+norm_dist = rnorm(859,34.835,21.668)
+#теперь по модулю все сделаем чтоб создать легкую левостороннюю ассиметрию, как у нас и есть
+norm_dist = abs(round(sample(norm_dist), 0))
+loans_t = loans %>% filter (is.na(Months_since_last_delinquent))
+loans = anti_join(loans, loans_t, by = "ID")
+loans_t$Months_since_last_delinquent = norm_dist
+loans = rbind (loans, loans_t)
+loans = loans %>% arrange (ID)
+rm(loans_t)
+```
+```{r}
+for (i in 2:ncol(loans)){
+n = sum(is.na(loans[,i]))
+if (n != 0)
+{print (names(loans)[i])
+print (n)}
+}
+```
+
+Переменную Years_current_job я решил тоже заполнить самым частым значением, так как там большой перевес в ее сторону. 
+
+```{r}
+ggplot () + geom_bar (aes(x = loans$Years_current_job))
+loans$Years_current_job = str_replace_na(loans$Years_current_job, replacement = most_freq(loans$Years_current_job))
+loans_backup = loans
+loans_backup_for_check = loans
+```
+Изучаю переменную Annual_Income. 
+```{r}
+ggplot() + geom_boxplot(aes(x = loans$Annual_Income))
+```
+
+```{r}
+ggplot()+ geom_histogram(aes(x = loans$Annual_Income)) 
+```
+Решил проверить не одинаковые ли строчки пропущены по переменным Annual_Income и Credit_Score. 
+```{r}
+loans %>% group_by(Annual_Income, Credit_Score) %>% summarize (count = n()) %>% arrange (-count)
+```
+Возможно между ними есть корреляция?
+Нет. 
+```{r}
+cor(na.omit(loans$Annual_Income), na.omit(loans$Credit_Score), use = "everything",
+    method = c("pearson", "kendall", "spearman"))
+```
+
+Все функции импьютинга выдавали полностью NA значения по Annual_Income, как и линейная регрессия, так что я решил снова использовать нормальное распределение на основе переменной. 
+```{r include=F}
+#если захотите проверить
+B <- is.na(loans_backup_for_check)
+B[,-3] <- T
+B[,-3] <- F
+fp_imputes = mice(loans, m = 5, seed =1124, maxit = 25, method = "cart", where = B)
+t = fp_imputes$imp$Annual_Income
+```
+
+```{r}
+rm(t, fp_imputes, B)
+```
+
+```{r}
+min(na.omit(loans$Annual_Income))
+max(na.omit(loans$Annual_Income))
+median(na.omit(loans$Annual_Income))
+most_freq(loans$Annual_Income)
+quantile(na.omit(loans$Annual_Income))
+mean(na.omit(loans$Annual_Income))
+sd(na.omit(loans$Annual_Income))
+```
+Но так как в данной переменной очень много выбросов, то я изучал распределение по первым трем квартилям. 
+```{r}
+h = loans %>% filter (Annual_Income <=1640232 )
+mean(na.omit(h$Annual_Income))
+median(na.omit(h$Annual_Income))
+most_freq(h$Annual_Income)
+sd(na.omit(h$Annual_Income))
+quantile(na.omit(h$Annual_Income))
+```
+
+```{r}
+set.seed(9287)
+norm_dist = rnorm(1526,1012843,330629.4)
+norm_dist = abs(round(sample(norm_dist), 0))
+rm(h)
+```
+
+```{r}
+loans_t = loans %>% filter (is.na(Annual_Income))
+loans = anti_join(loans, loans_t, by = "ID")
+loans_t$Annual_Income = norm_dist
+loans = rbind (loans, loans_t)
+loans = loans %>% arrange (ID)
+rm(loans_t, norm_dist)
+ggplot() + geom_histogram(aes(x = loans$Annual_Income))
+```
+Выглядит схоже. 
+
+```{r}
+for (i in 2:ncol(loans)){
+n = sum(is.na(loans[,i]))
+if (n != 0)
+{print (names(loans)[i])
+print (n)}
+}
+```
+С Credit_Score я решил проверить есть ли у нее вообще хоть с какой-нибудь переменной корреляция, есть ли смысл иначе как-то заполнять пропуски. 
+```{r}
+h = loans[ , purrr::map_lgl(loans, is.numeric)]
+h = na.omit (h)
+cormat <- round(cor(h),2)
+library(reshape2)
+melted_cormat <- melt(cormat)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()+theme(text = element_text(size = 10), axis.text.x = element_text(angle = 45, hjust = 1))
+rm(h, cormat, melted_cormat)
+```
+Нет.
+Использую импьютинг библиотекой MICE. 
+P.S. При последующей работе с выбросами я не вернусь к данной переменной, так как по ней не может быть выбросов, так как это не какая-то понятная величина, а плод банковских алгоритмов. 
+
+```{r}
+B <- is.na(loans)
+B[,-17] <- T
+B[,-17] <- F
+fp_imputes = mice(loans, m = 5, seed =1126, maxit = 30, method = "cart", where = B)
+t = fp_imputes$imp$Credit_Score
+sum(is.na(t))
+```
+
+```{r}
+ggplot() + geom_histogram(aes(loans$Credit_Score)) + geom_histogram(aes(x = t$`5`), fill = "steelblue", alpha = 1)
+```
+Выбрал лучший вариант. 
+```{r}
+dbb = loans %>% filter (rownames(loans)%in% rownames(t))
+dbb$Credit_Score = t$`5`
+loans = anti_join(loans,dbb, by = "ID")
+loans = rbind(loans, dbb)
+loans = loans %>% arrange(ID)
+rm(dbb, t, fp_imputes)
+loans$Current_Credit_Balance = as.numeric(loans$Current_Credit_Balance)
+loans$Current_Loan_Amount = as.numeric(loans$Current_Loan_Amount)
+loans$Monthly_Debt = as.numeric(loans$Monthly_Debt)
+loans$ID = as.numeric(loans$ID)
+sum(is.na(loans))
+```
+
+Теперь я поработаю с выбросами. Ниже переменные, в который присутсвуют явные выбросы.
+
+Изучаем. 
+```{r}
+ggplot() + geom_boxplot(aes(x = loans$Maximum_Open_Credit))
+```
+Чтобы не сильно усреднить общую картину, такие большие выбросы я не буду заменять числом. Вместо этого я установлю верхнюю границу выбросов по формуле X75 + 1.5*(X75 - X25) и на этой основе создам категории. 
+```{r}
+quantile(loans$Maximum_Open_Credit)
+793815 + 1.5*(793815-279565)
+loans$Maximum_Open_Credit = as.numeric(loans$Maximum_Open_Credit)
+loans$Maximum_Open_Credit = case_when (loans$Maximum_Open_Credit< 279565 ~ "1", loans$Maximum_Open_Credit >279564.9 & loans$Maximum_Open_Credit<480502.1 ~ "2", loans$Maximum_Open_Credit >480502.1 & loans$Maximum_Open_Credit < 793815.1 ~ "3", loans$Maximum_Open_Credit>793815.1 & loans$Maximum_Open_Credit<1565190.1 ~ "4", loans$Maximum_Open_Credit > 1565190.1 ~ "5", T~"6")
+```
+Делаю все то же самое. 
+```{r}
+ggplot() + geom_boxplot(aes(x = loans$Current_Loan_Amount))
+```
+```{r}
+quantile(loans$Current_Loan_Amount)
+520685 + 1.5*(520685-180081)
+loans$Current_Loan_Amount = case_when (loans$Current_Loan_Amount<  180081 ~ "1", loans$Current_Loan_Amount > 180080.9 & loans$Current_Loan_Amount<309364.1 ~ "2", loans$Current_Loan_Amount >309364.1 & loans$Current_Loan_Amount < 520685.1 ~ "3", loans$Current_Loan_Amount>520685.1 & loans$Current_Loan_Amount<1031591.1 ~ "4", loans$Current_Loan_Amount > 1031591.1 ~ "5", T~"6")
+```
+```{r}
+ggplot() + geom_boxplot(aes(x = loans$Current_Credit_Balance))
+```
+```{r}
+quantile(loans$Current_Credit_Balance)
+360487 + 1.5*(360487-114361)
+loans$Current_Credit_Balance = case_when (loans$Current_Credit_Balance<  114361 ~ "1", loans$Current_Credit_Balance > 114360.9 & loans$Current_Credit_Balance<209342.1 ~ "2", loans$Current_Credit_Balance >209342.1 & loans$Current_Credit_Balance < 360487.1 ~ "3", loans$Current_Credit_Balance>360487.1 & loans$Current_Credit_Balance<729676.1 ~ "4", loans$Current_Credit_Balance > 729676.1 ~ "5", T~"6")
+```
+```{r}
+sum(is.na(loans))
+```
+Предобработка и импьютинг на тренировочном датасете завершены. Перехожу к соответсвующей работе на тестовом датасете. 
+
+```{r}
+real_loans = read_csv("~/3 курс/pervoe sorevnovanie/2/test.csv")
+n = colnames (real_loans)
+n
+n = c("ID", "Home_Ownership", "Annual_Income","Years_current_job", "Tax_Liens", "Number_Open_Accounts", "Years_Credit_History","Maximum_Open_Credit","Number_Credit_Problems","Months_since_last_delinquent", "Bankruptcies","Purpose","Term","Current_Loan_Amount","Current_Credit_Balance","Monthly_Debt","Credit_Score","Credit_Default")
+colnames(real_loans) = n
+qwerty_id = real_loans[,1]
+real_loans[,1] = rownames(real_loans)
+real_loans$Current_Credit_Balance = as.numeric(real_loans$Current_Credit_Balance)
+real_loans$Current_Loan_Amount = as.numeric(real_loans$Current_Loan_Amount)
+real_loans$Monthly_Debt = as.numeric(real_loans$Monthly_Debt)
+real_loans$ID = as.numeric(real_loans$ID)
+```
+
+```{r}
+for (i in 2:ncol(real_loans)){
+n = sum(is.na(real_loans[,i]))
+if (n != 0)
+{print (names(real_loans)[i])
+print (n)}
+}
+most_freq <- function(x) {
+uniqx <- unique(na.omit(x))
+uniqx[which.max(tabulate(match(x, uniqx)))]
+}
+```
+
+```{r}
+real_loans$Bankruptcies = str_replace_na(real_loans$Bankruptcies, replacement = most_freq(real_loans$Bankruptcies))
+real_loans$Purpose = str_replace_na(real_loans$Purpose, replacement = most_freq(real_loans$Purpose))
+real_loans$Term = str_replace_na(real_loans$Term, replacement = most_freq(real_loans$Term))
+real_loans$Current_Loan_Amount = str_replace_na(real_loans$Current_Loan_Amount, replacement = most_freq(real_loans$Current_Loan_Amount))
+real_loans$Current_Credit_Balance = str_replace_na(real_loans$Current_Credit_Balance, replacement = most_freq(real_loans$Current_Credit_Balance))
+real_loans$Monthly_Debt = str_replace_na(real_loans$Monthly_Debt, replacement = most_freq(real_loans$Monthly_Debt))
+```
+
+```{r}
+ggplot () + geom_histogram(aes(x = real_loans$Months_since_last_delinquent))
+```
+
+```{r}
+B <- is.na(real_loans)
+B[,-10] <- T
+B[,-10] <- F
+fp_imputes = mice(real_loans, m = 4, seed =112, maxit = 25, method = "cart", where = B)
+t = fp_imputes$imp$Months_since_last_delinquent
+ggplot () + geom_histogram(aes(x = real_loans$Months_since_last_delinquent)) + geom_histogram(aes(x = t$`3`), fill = "red", alpha = 0.3)
+```
+
+```{r}
+dbb = real_loans %>% filter (rownames(real_loans)%in% rownames(t))
+dbb$Months_since_last_delinquent = t$`3`
+real_loans = anti_join(real_loans,dbb, by = "ID")
+real_loans = rbind(real_loans, dbb)
+real_loans = real_loans %>% arrange(ID)
+rm(dbb, t, fp_imputes)
+real_loans$Current_Credit_Balance = as.numeric(real_loans$Current_Credit_Balance)
+real_loans$Current_Loan_Amount = as.numeric(real_loans$Current_Loan_Amount)
+real_loans$Monthly_Debt = as.numeric(real_loans$Monthly_Debt)
+real_loans$ID = as.numeric(real_loans$ID)
+```
+
+```{r}
+mean(na.omit(real_loans$Months_since_last_delinquent))
+sd(na.omit(real_loans$Months_since_last_delinquent))
+set.seed(98)
+norm_dist = rnorm(277,34.658, 22.211)
+norm_dist = abs(round(sample(norm_dist), 0))
+real_loans_t = real_loans %>% filter (is.na(Months_since_last_delinquent))
+real_loans = anti_join(real_loans, real_loans_t, by = "ID")
+real_loans_t$Months_since_last_delinquent = norm_dist
+real_loans = rbind (real_loans, real_loans_t)
+real_loans = real_loans %>% arrange (ID)
+rm(real_loans_t)
+```
+
+```{r}
+for (i in 2:ncol(real_loans)){
+n = sum(is.na(real_loans[,i]))
+if (n != 0)
+{print (names(real_loans)[i])
+print (n)}
+}
+```
+
+```{r}
+ggplot () + geom_bar (aes(x = real_loans$Years_current_job))
+real_loans$Years_current_job = str_replace_na(real_loans$Years_current_job, replacement = most_freq(real_loans$Years_current_job))
+real_loans_backup = real_loans
+real_loans_backup_for_check = real_loans
+```
+
+Импьютинг не сработал и тут. 
+```{r include=F}
+#если захотите проверить
+B <- is.na(real_loans_backup_for_check)
+B[,-3] <- T
+B[,-3] <- F
+fp_imputes = mice(real_loans, m = 5, seed =14, maxit = 25, method = "cart", where = B)
+t = fp_imputes$imp$Annual_Income
+```
+
+```{r}
+rm(t, fp_imputes, B)
+```
+
+
+```{r}
+min(na.omit(real_loans$Annual_Income))
+max(na.omit(real_loans$Annual_Income))
+median(na.omit(real_loans$Annual_Income))
+most_freq(real_loans$Annual_Income)
+quantile(na.omit(real_loans$Annual_Income))
+mean(na.omit(real_loans$Annual_Income))
+sd(na.omit(real_loans$Annual_Income))
+```
+
+```{r}
+h = real_loans %>% filter (Annual_Income <=1629734.5)
+mean(na.omit(h$Annual_Income))
+median(na.omit(h$Annual_Income))
+most_freq(h$Annual_Income)
+sd(na.omit(h$Annual_Income))
+quantile(na.omit(h$Annual_Income))
+```
+
+```{r}
+set.seed(928)
+norm_dist = rnorm(513,1013366,329758.8)
+norm_dist = abs(round(sample(norm_dist), 0))
+rm(h)
+```
+
+```{r}
+real_loans_t = real_loans %>% filter (is.na(Annual_Income))
+real_loans = anti_join(real_loans, real_loans_t, by = "ID")
+real_loans_t$Annual_Income = norm_dist
+real_loans = rbind (real_loans, real_loans_t)
+real_loans = real_loans %>% arrange (ID)
+rm(real_loans_t, norm_dist)
+ggplot() + geom_histogram(aes(x = real_loans$Annual_Income))
+```
+
+
+```{r}
+for (i in 2:ncol(real_loans)){
+n = sum(is.na(real_loans[,i]))
+if (n != 0)
+{print (names(real_loans)[i])
+print (n)}
+}
+```
+
+```{r}
+B <- is.na(real_loans)
+B[,-17] <- T
+B[,-17] <- F
+fp_imputes = mice(real_loans, m = 5, seed =1126, maxit = 30, method = "cart", where = B)
+t = fp_imputes$imp$Credit_Score
+sum(is.na(t))
+```
+
+```{r}
+ggplot() + geom_histogram(aes(real_loans$Credit_Score)) + geom_histogram(aes(x = t$`1`), fill = "steelblue", alpha = 1)
+```
+
+```{r}
+dbb = real_loans %>% filter (rownames(real_loans)%in% rownames(t))
+dbb$Credit_Score = t$`1`
+real_loans = anti_join(real_loans,dbb, by = "ID")
+real_loans = rbind(real_loans, dbb)
+real_loans = real_loans %>% arrange(ID)
+rm(dbb, t, fp_imputes)
+real_loans$Current_Credit_Balance = as.numeric(real_loans$Current_Credit_Balance)
+real_loans$Current_Loan_Amount = as.numeric(real_loans$Current_Loan_Amount)
+real_loans$Monthly_Debt = as.numeric(real_loans$Monthly_Debt)
+real_loans$ID = as.numeric(real_loans$ID)
+sum(is.na(real_loans))
+```
+
+```{r}
+ggplot() + geom_boxplot(aes(x = real_loans$Maximum_Open_Credit))
+```
+
+```{r}
+quantile(real_loans$Maximum_Open_Credit)
+802598.5 + 1.5*(802598.5-278586)
+real_loans$Maximum_Open_Credit = case_when (real_loans$Maximum_Open_Credit< 278586 ~ "1", real_loans$Maximum_Open_Credit >278585.9 & real_loans$Maximum_Open_Credit<478676.1 ~ "2", real_loans$Maximum_Open_Credit >478676.1 & real_loans$Maximum_Open_Credit <802598.1 ~ "3", real_loans$Maximum_Open_Credit>802598.1 & real_loans$Maximum_Open_Credit<1588617.1 ~ "4", real_loans$Maximum_Open_Credit > 1588617.1 ~ "5", T~"6")
+```
+
+```{r}
+ggplot() + geom_boxplot(aes(x = real_loans$Current_Loan_Amount))
+```
+
+```{r}
+quantile(real_loans$Current_Loan_Amount)
+522582 + 1.5*(522582-187126)
+
+real_loans$Current_Loan_Amount = case_when (real_loans$Current_Loan_Amount<  187126 ~ "1", real_loans$Current_Loan_Amount > 187125.9 & real_loans$Current_Loan_Amount<322366.1 ~ "2", real_loans$Current_Loan_Amount >322366.1 & real_loans$Current_Loan_Amount < 522582.1 ~ "3", real_loans$Current_Loan_Amount>522582.1 & real_loans$Current_Loan_Amount<1025766.1 ~ "4", real_loans$Current_Loan_Amount > 1025766.1 ~ "5", T~"6")
+```
+
+```{r}
+ggplot() + geom_boxplot(aes(x = real_loans$Current_Credit_Balance))
+```
+
+```{r}
+quantile(real_loans$Current_Credit_Balance)
+366348 + 1.5*(366348-110114)
+
+real_loans$Current_Credit_Balance = case_when (real_loans$Current_Credit_Balance<110114 ~ "1", real_loans$Current_Credit_Balance > 110113.9 & real_loans$Current_Credit_Balance<207385.1 ~ "2", real_loans$Current_Credit_Balance >207385.1 & real_loans$Current_Credit_Balance <366348.1 ~ "3", real_loans$Current_Credit_Balance>366348.1 & real_loans$Current_Credit_Balance<750699.1 ~ "4", real_loans$Current_Credit_Balance > 750699.1 ~ "5", T~"6")
+real_loans_backup = real_loans
+```
+
+```{r}
+sum(is.na(real_loans))
+```
+
+Теперь перехожу к моделям. 
+Как и в прошлой работе я не оставил следов экспериментов, а оставил все то, что повлияло на submission. 
+
+```{r}
+loans_backup = loans
+```
+
+```{r}
+loans = loans_backup
+loans$Credit_Default = as.factor(loans$Credit_Default)
+
+nums <- loans[ , purrr::map_lgl(loans, is.numeric)]
+sum(is.na(nums))
+loans_t = loans$Credit_Default
+loans= loans[,-18]
+loans = dummy_columns(loans,select_columns = NULL, ignore_na = F)
+loans = loans[ -c(1:17)]
+loans = cbind(loans, nums)
+loans$Credit_Default = loans_t
+```
+
+```{r}
+real_loans = real_loans_backup
+
+nums <- real_loans[ , purrr::map_lgl(real_loans, is.numeric)]
+sum(is.na(nums))
+
+real_loans = dummy_columns(real_loans,select_columns = NULL, ignore_na = F)
+real_loans = real_loans[ -c(1:17)]
+real_loans = cbind(real_loans, nums)
+```
+
+```{r}
+common_names <- intersect(names(loans), names(real_loans))
+loans = select(loans, common_names)
+loans$Credit_Default = as.factor(loans_backup$Credit_Default)
+```
+
+```{r}
+real_loans = select(real_loans, common_names)
+```
+
+
+```{r}
+set.seed(1309)
+ind = initial_split(loans, prop = 0.75)
+loans.train = training (ind)
+loans.test = testing (ind)
+```
+
+Из двух моделей оказалась лучшей Случайный Лес. 
+
+```{r}
+x = rand_forest(mode = "classification", mtry = 10) %>% set_engine('randomForest')
+#x = boost_tree(mode = "classification", mtry = 10) %>% set_engine('xgboost')
+set.seed (0703)
+resample = vfold_cv(loans.train, v = 15)
+wf_x = workflow() %>% 
+  add_model(x) %>% add_formula(Credit_Default~.-ID) %>% 
+  fit(loans.train)
+tune = tune_grid(wf_x, resample) %>% select_best("accuracy")
+final = finalize_model(x, tune) %>% fit(Credit_Default~.-ID, loans.train)
+pred = predict (final, loans.train)
+pred1 = predict(final, loans.test)
+acc = accuracy_vec(pred$.pred_class, loans.train$Credit_Default)
+acc
+acc1 = accuracy_vec(pred1$.pred_class, loans.test$Credit_Default)
+acc1
+```
+Да, модель сильно переобучена, но я экспериментировал: изменял параметры, пробовал другие функции ансамблей (из parsnip), пробовал добавить случайные 500 строк из test к train (Credit_Default рандомно семплировал из train); но самым лучшим результатом по итогу оказалась эта переобученная модель. Вот. 
+
+```{r}
+pr = final %>%  predict (new_data = real_loans)
+```
+
+
+```{r}
+to_send_default <- data.frame(Id=qwerty_id, dbb = pr$.pred_class)
+loans = read_csv("~/3 курс/pervoe sorevnovanie/2/train.csv")
+loans1 = as.data.frame(loans[,1])
+loans1[,2]=as.data.frame(loans[,18])
+colnames(to_send_default)= colnames(loans1)
+write_csv(to_send_default, "to_send_default.csv")
+```
+
+

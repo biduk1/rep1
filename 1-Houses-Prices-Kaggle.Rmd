@@ -1,0 +1,746 @@
+---
+title: "1 kaggle"
+author: "nbidenko"
+date: "18 12 2021"
+output: html_document
+---
+
+Начнем с загрузки данных
+
+```{r}
+library(readr)
+library(dplyr)
+library(mice)
+library(VIM)
+library (ggplot2)
+houses <- read.csv("~/shared/minor2_2020/3-Kaggle-ML/data/train.csv", stringsAsFactors=TRUE)
+```
+
+Сначала посмотрим на пропуски в данных.
+
+```{r}
+for (i in 2:ncol(houses)){
+  n = sum(is.na(houses[,i]))
+  if (n != 0)
+  {print (names(houses)[i])
+    print (n)}
+}
+```
+Уберем колонки, в которых пропущено больше 75% значений. 
+```{r}
+houses = subset(houses, select = c (-Alley, -PoolQC,-MiscFeature, -Fence))
+```
+
+Посмотрим снова. Но пока не учтем колонки, в которых менее 100 пропусков. 
+
+```{r}
+for (i in 2:ncol(houses)){
+  n = sum(is.na(houses[,i]))
+  if (n > 100)
+  {print (names(houses)[i])
+    print (n)}
+}
+```
+Именно эти колонки станут первоначальным предметом применения импьютинга. 
+
+Изучим эти колонки внимательнее. 
+
+```{r}
+class (houses$LotFrontage)
+class (houses$FireplaceQu)
+head (houses$LotFrontage)
+levels (houses$FireplaceQu)
+```
+Я решил, что для импьютинга я буду использовать библиотеку MICE. 
+
+```{r}
+ggplot () + geom_bar (aes(x = houses$FireplaceQu)) 
+```
+
+```{r}
+B <- is.na(houses)
+B[,-57] <- T
+B[,-57] <- F
+fp_imputes = mice(houses, m = 3, seed =11, maxit = 25, method = "polyreg", where = B)
+t = fp_imputes$imp$FireplaceQu
+```
+
+```{r} 
+# не использую функцию complete тк она не работает почему-то
+dbb = houses %>% filter (rownames(houses)%in% rownames(t))
+dbb$FireplaceQu = t$`2`
+houses = anti_join(houses,dbb,  by = "Id")
+houses = rbind(houses, dbb)
+houses = houses %>% arrange(Id)
+rm(dbb, t, fp_imputes)
+```
+Остатки пропусков ликвидирую бустингом. 
+
+```{r}
+library (parsnip)
+library(tidymodels)
+houses.nomiss = houses %>% filter (is.na(FireplaceQu))
+houses.nomiss = anti_join(houses, houses.nomiss, by = "Id")
+
+x = boost_tree(mode = "classification") %>% 
+  set_engine('xgboost')
+set.seed (123)
+wf_x = workflow() %>% 
+  add_model(x) %>% add_formula(FireplaceQu~.-Id) %>% 
+  fit(houses.nomiss)
+
+
+fp.rf = predict(wf_x, houses.nomiss)
+acc = accuracy_vec(fp.rf$.pred_class, houses.nomiss$FireplaceQu)
+acc
+
+houses.misses = anti_join(houses, houses.nomiss, by = "Id")
+tp = predict (wf_x, houses.misses)
+houses.misses$FireplaceQu = tp$.pred_class
+houses = rbind(houses.nomiss, houses.misses)
+houses = houses %>% arrange(Id)
+rm(x, wf_x, fp.rf, acc, houses.misses, houses.nomiss, tp)
+```
+
+Перехожу ко второй крупной потере в данных - LotFrontage. Посмотрю не являются пропуски аутлаерами по переменной SalePrice. 
+
+```{r}
+marginplot(houses[, c("SalePrice", "LotFrontage")], col = mdc(1:2), cex.numbers = 1.2, pch = 19)
+```
+Как можно увидеть, пропуски по LotFrontage в основном не представляются аутлаерами по цене дома, а значит можно не сильно опасаться их импьютинга.
+
+Снова использую MICE. 
+```{r}
+houses$LotFrontage = as.numeric(houses$LotFrontage)
+A <- is.na(houses)
+A[,-4] <- T
+A[,-4] <- F 
+LF_imputes = mice(houses, m = 5, seed = 100, where = A, maxit = 25, method = "cart")
+f = LF_imputes$imp$LotFrontage
+ggplot() + geom_histogram(aes(x = houses$LotFrontage))+ geom_histogram (aes(x = f$`1`), fill = "steelblue", alpha = 0.4)
+```
+
+Остатки устраню медианным значением. 
+```{r}
+dbb = houses %>% filter (rownames(houses)%in% rownames(f))
+dbb$LotFrontage = f$`1`
+houses = anti_join(houses,dbb,  by = "Id")
+houses = rbind(houses, dbb)
+houses = houses %>% arrange(Id)
+
+nomiss = as.data.frame(as.numeric(na.omit (houses$LotFrontage)))
+houses$LotFrontage = str_replace_na(houses$LotFrontage, replacement = median (nomiss[,1]))
+sum(is.na(houses$LotFrontage))
+houses$LotFrontage = as.numeric(houses$LotFrontage)
+rm(dbb, f, LF_imputes, nomiss, A, B)
+```
+
+Снова изучаю пропуски в данных. 
+```{r}
+for (i in 2:ncol(houses)){
+  n = sum(is.na(houses[,i]))
+  if (n != 0)
+  {print (names(houses)[i])
+    print (n)}
+}
+```
+
+```{r}
+library(stringr)
+houses_backup = houses
+```
+Часть колонок я исключу потом, а в некоторых пропуски заполню самым частым значением.
+
+Создаю функцию, чтобы заполнять пропуски самым частым значением по переменной. 
+```{r}
+most_freq <- function(x) {
+  uniqx <- unique(na.omit(x))
+  uniqx[which.max(tabulate(match(x, uniqx)))]
+}
+```
+
+Заполняю.
+```{r}
+houses$MasVnrType = str_replace_na(houses$MasVnrType, replacement = most_freq(houses$MasVnrType))
+houses$MasVnrArea = str_replace_na(houses$MasVnrArea, replacement = most_freq(houses$MasVnrArea))
+houses$MasVnrArea = as.numeric(houses$MasVnrArea)
+houses$Electrical = str_replace_na(houses$Electrical, replacement = most_freq(houses$Electrical))
+sum(is.na(houses))
+```
+
+```{r}
+houses_backup = houses
+library(rsample)
+library(fastDummies)
+library(dplyr)
+library (readr)
+```
+
+```{r}
+houses = houses_backup
+```
+
+Начинаю тестировать модели и создаю дамми-переменные, тк иначе не работает. 
+Я исключаю сейчас и в дальнейшем переменные (ниже), так как проупски в них связаны, а импьютинг не сработал так, чтобы сохранить структуру одновременно по всем. Плюс они факторные, и в test были новые уровни по ним. 
+```{r}
+houses = subset (houses, select = -c (BsmtQual, BsmtCond, BsmtExposure, BsmtFinType1, BsmtFinType2,GarageType, GarageYrBlt, GarageFinish, GarageQual, GarageCond))
+
+houses = dummy_columns(houses,select_columns = NULL, ignore_na = F)
+houses = houses[ -c(2:66)]
+
+set.seed(112)
+ind = initial_split(houses, prop = 0.75)
+houses.train = training (ind)
+houses.test = testing (ind)
+```
+
+Пробую первую модель. 
+```{r}
+library(parsnip)
+library(tidymodels)
+model = svm_rbf(mode = "regression", engine = "kernlab",cost = NULL,rbf_sigma = NULL,margin = NULL)
+
+set.seed(984845)
+log = workflow() %>% 
+    add_model(model) %>% 
+     add_formula(log(SalePrice)~.-Id) %>% 
+     fit(data = houses.train)
+
+lr_pred_train <- predict(log, houses.train)
+lr_pred_test <- predict(log, houses.test)
+sum(is.na(lr_pred_train))
+rmse_lr_train <- mean((lr_pred_train$.pred - log(houses.train$SalePrice))^2)^(1/2)
+rmse_lr_test <- mean((lr_pred_test$.pred- log(houses.test$SalePrice))^2)^(1/2)
+rmse_lr_train
+rmse_lr_test 
+```
+0.1073709 - на тренировочной 
+0.2044735 - на тестовой 
+
+Результаты отличаются весьма серьезно, поэтому надо работать с данными дальше или попробовать другую модель. 
+
+Попробуею модель линейная регрессия на предсказание логарифма цены.  
+```{r}
+set.seed(100)
+lm.fit <- glm(log(SalePrice)~.-Id, data = houses.train)
+
+lr_pred_train <- predict(lm.fit, houses.train)
+lr_pred_test <- predict(lm.fit, houses.test)
+sum(is.na(lr_pred_train))
+rmse_lrl_train <- mean((lr_pred_train - log(houses.train$SalePrice))^2)^(1/2)
+rmse_lrl_test <- mean((lr_pred_test- log(houses.test$SalePrice))^2)^(1/2)
+rmse_lrl_train
+rmse_lrl_test 
+```
+0.1559039 - тренировочная
+0.209009 - тестовая 
+
+Разброс уменьшился, но тем не менее на тестовой выборке результат требуется улучшить. 
+
+Для начала попробую убрать выбросы и проверить насколько сильным оказалось их влияние.
+
+P.S. Сначала я просто прошелся по талице посмотрел в каких переменных вероятно могут быть выбросы, затем я построил по ним боксплоты и уже потом избавился. Код, использованных при нахождении, я решил убрать, чтобы не захламлять работу.  
+```{r}
+houses = houses_backup
+
+houses = houses %>% filter (houses$BsmtFinSF1 < 5000)
+houses = houses %>%  filter (houses$X1stFlrSF < 3000) 
+houses = houses %>%  filter (houses$EnclosedPorch < 400) 
+houses = houses %>%  filter (houses$MiscVal < 1999) 
+houses_backup = houses 
+```
+
+Теперь снова построю регрессии. 
+```{r}
+houses = subset (houses, select = -c (BsmtQual, BsmtCond, BsmtExposure, BsmtFinType1, BsmtFinType2,GarageType, GarageYrBlt, GarageFinish, GarageQual, GarageCond))
+
+houses = dummy_columns(houses,select_columns = NULL, ignore_na = F)
+houses = houses[ -c(2:66)]
+
+set.seed(112)
+ind = initial_split(houses, prop = 0.75)
+houses.train = training (ind)
+houses.test = testing (ind)
+```
+
+Тут я решил поменять тип модели, потому как не нашел особой разницы в их результатах путем экспериментов, а случайный лес ближе как-то что ли. 
+```{r}
+model = rand_forest(mode = "regression") %>% 
+  set_engine('randomForest')
+set.seed(984845)
+log = workflow() %>% 
+    add_model(model) %>% 
+     add_formula(log(SalePrice)~.-Id) %>% 
+     fit(data = houses.train)
+
+lr_pred_train <- predict(log, houses.train)
+lr_pred_test <- predict(log, houses.test)
+sum(is.na(lr_pred_train))
+rmse_lr_train <- mean((lr_pred_train$.pred - log(houses.train$SalePrice))^2)^(1/2)
+rmse_lr_test <- mean((lr_pred_test$.pred- log(houses.test$SalePrice))^2)^(1/2)
+rmse_lr_train
+rmse_lr_test 
+```
+0.09596949 - тренировочная 
+0.2011408 - тестовая
+
+```{r}
+set.seed(100)
+lm.fit <- glm(log(SalePrice)~.-Id, data = houses.train)
+
+lr_pred_train <- predict(lm.fit, houses.train)
+lr_pred_test <- predict(lm.fit, houses.test)
+sum(is.na(lr_pred_train))
+rmse_lrl_train <- mean((lr_pred_train - log(houses.train$SalePrice))^2)^(1/2)
+rmse_lrl_test <- mean((lr_pred_test- log(houses.test$SalePrice))^2)^(1/2)
+rmse_lrl_train
+rmse_lrl_test 
+```
+0.1592163 -тренировочная
+0.1947953 - тестовая
+
+Результаты немного улучшились. Отлчино. 
+
+В этой части я делал анализ главных компонент для количественных переменных, с мыслью, что получится эффективно избавиться от неважных переменных. Такого результата я не достиг и код экспериментов удалил. Но по итогу данные PCA пригодились мне немного для другого. 
+
+```{r}
+library (stats)
+for_pca = subset (houses_backup, select = c(MSSubClass, LotFrontage, LotArea, OverallQual, OverallCond, MasVnrArea, BsmtFinSF1, BsmtFinSF2, BsmtUnfSF, TotalBsmtSF, X1stFlrSF, X2ndFlrSF, LowQualFinSF, GrLivArea, GarageArea, WoodDeckSF, OpenPorchSF, EnclosedPorch, X3SsnPorch, ScreenPorch, PoolArea, MiscVal)) 
+```
+
+```{r}
+pr.out = prcomp (for_pca, scale = T)
+summary (pr.out)
+pr.out
+```
+
+А теперь я перехожу к работе с финальными вариантами предсказательных моделей и работе с уже настоящим тестовым датасетом, поэтому чанки идут вперемешку, но на самом деле по порядку, так как следы экспериментов я опять удалил.
+
+К этому моменту я придумал, что использую одну модель для предсказания цены, а полученное предсказание использую в дальнейшем предсказании. Но чтобы избежать сильного переобучения, я на основе предсказанных цен создал 5 категорий цен домов. Но об этом позже. 
+
+Загружаю тестовую выборку. 
+```{r}
+real_houses <- read.csv("~/shared/minor2_2020/3-Kaggle-ML/data/test.csv")
+```
+
+И с ней прохожу все те же (почти) шаги, что и с тренировочной.
+
+```{r}
+for (i in 2:ncol(real_houses)){
+  n = sum(is.na(real_houses[,i]))
+  if (n != 0)
+  {print (names(real_houses)[i])
+    print (n)}
+}
+```
+
+```{r}
+real_houses = subset(real_houses, select = c (-Alley, -PoolQC,-MiscFeature, -Fence))
+real_houses$FireplaceQu = as.factor(real_houses$FireplaceQu)
+```
+
+```{r}
+for (i in 2:ncol(real_houses)){
+  n = sum(is.na(real_houses[,i]))
+  if (n > 100)
+  {print (names(real_houses)[i])
+    print (n)}
+}
+```
+
+```{r}
+class (real_houses$LotFrontage)
+class (real_houses$FireplaceQu)
+head (real_houses$LotFrontage)
+levels (real_houses$FireplaceQu)
+```
+
+```{r}
+ggplot () + geom_bar (aes(x = real_houses$FireplaceQu)) 
+```
+
+```{r}
+B <- is.na(real_houses)
+B[,-57] <- T
+B[,-57] <- F
+fp_imputes = mice(real_houses, m = 3, seed =121, maxit = 25, method = "polyreg", where = B)
+t = fp_imputes$imp$FireplaceQu
+```
+
+```{r}
+dbb = real_houses %>% filter (rownames(real_houses)%in% rownames(t))
+dbb$FireplaceQu = t$`3`
+real_houses = anti_join(real_houses,dbb,  by = "Id")
+real_houses = rbind(real_houses, dbb)
+real_houses = real_houses %>% arrange(Id)
+rm(dbb, t, fp_imputes)
+```
+
+На этом шаге почему-то все переменные стали класса character и пришлось вручную менять, потому что опять же, после двух часов кодинга я так и не смог сделать это автоматическим процессом (ни циклом, ни функцией, ни гуглингом).
+```{r}
+real_backup = real_houses
+chrs <- sapply(real_houses, is.character)
+chrCols <- names(real_houses[, chrs])
+chrCols
+
+real_houses[,3] = as.factor (real_houses[,3])
+real_houses[,6] = as.factor (real_houses[,6])
+real_houses[,7] = as.factor (real_houses[,7])
+real_houses[,8] = as.factor (real_houses[,8])
+real_houses[,57] = as.factor (real_houses[,57])
+real_houses$Utilities = as.factor (real_houses$Utilities)
+real_houses$LotConfig = as.factor (real_houses$LotConfig)
+real_houses$LandSlope = as.factor (real_houses$LandSlope)
+real_houses$Neighborhood = as.factor (real_houses$Neighborhood)
+real_houses$Condition1 = as.factor (real_houses$Condition1)
+real_houses$Condition2 = as.factor (real_houses$Condition2)
+real_houses$BldgType = as.factor (real_houses$BldgType)
+real_houses$HouseStyle = as.factor (real_houses$HouseStyle)
+real_houses$RoofStyle = as.factor (real_houses$RoofStyle)
+real_houses$RoofMatl = as.factor (real_houses$RoofMatl)
+real_houses$Exterior1st = as.factor (real_houses$Exterior1st)
+real_houses$Exterior2nd = as.factor (real_houses$Exterior2nd)
+real_houses$MasVnrType = as.factor (real_houses$MasVnrType)
+real_houses$ExterQual = as.factor (real_houses$ExterQual)
+real_houses$ExterCond = as.factor (real_houses$ExterCond)
+real_houses$Foundation = as.factor (real_houses$Foundation)
+real_houses$Heating = as.factor (real_houses$Heating)
+real_houses$HeatingQC = as.factor (real_houses$HeatingQC)
+real_houses$CentralAir = as.factor (real_houses$CentralAir)
+real_houses$Electrical = as.factor (real_houses$Electrical)
+real_houses$KitchenQual = as.factor (real_houses$KitchenQual)
+real_houses$Functional = as.factor (real_houses$Functional)
+real_houses$PavedDrive = as.factor (real_houses$PavedDrive)
+real_houses$SaleType = as.factor (real_houses$SaleType)
+real_houses$SaleCondition = as.factor (real_houses$SaleCondition)
+real_houses$MasVnrArea = as.numeric (real_houses$MasVnrArea)
+real_houses$BsmtFinSF1 = as.numeric (real_houses$BsmtFinSF1)
+real_houses$BsmtFinSF2 = as.numeric (real_houses$BsmtFinSF2)
+real_houses$BsmtUnfSF = as.numeric (real_houses$BsmtUnfSF)
+real_houses$TotalBsmtSF = as.numeric (real_houses$TotalBsmtSF)
+real_houses$BsmtFullBath = as.factor (real_houses$BsmtFullBath)
+real_houses$BsmtHalfBath = as.factor (real_houses$BsmtHalfBath)
+real_houses$FireplaceQu = as.factor (real_houses$FireplaceQu)
+real_houses$GarageCars = as.factor (real_houses$GarageCars)
+real_houses$YearBuilt = as.factor (real_houses$YearBuilt)
+real_houses$FullBath = as.factor (real_houses$FullBath)
+real_houses$HalfBath = as.factor (real_houses$HalfBath)
+real_houses$BedroomAbvGr = as.factor (real_houses$BedroomAbvGr)
+real_houses$KitchenAbvGr = as.factor (real_houses$KitchenAbvGr)
+real_houses$YearRemodAdd = as.factor (real_houses$YearRemodAdd)
+real_houses$GarageArea =  as.numeric (real_houses$GarageArea)
+real_houses$OpenPorchSF = as.numeric (real_houses$OpenPorchSF)
+real_houses$YrSold = as.factor (real_houses$YrSold)
+real_backup = real_houses
+```
+
+У меня почему-то не получилось использовать ни одну из моделей машинного обучения для предсказания FireplaceQu на этих данных - постоянно все ломалось и я так и не смог разобраться с этим, поэтому я решил остатки заполнить самым частым значением. 
+```{r}
+real_houses$FireplaceQu = str_replace_na(real_houses$FireplaceQu, replacement = most_freq(real_houses$FireplaceQu))
+```
+
+Все теперь продолжаем, как раньше делать. 
+```{r}
+real_houses$LotFrontage = as.numeric(real_houses$LotFrontage)
+A <- is.na(real_houses)
+A[,-4] <- T
+A[,-4] <- F 
+LF_imputes = mice(real_houses, m = 5, seed = 100, where = A, maxit = 25, method = "cart")
+f = LF_imputes$imp$LotFrontage
+ggplot() + geom_histogram(aes(x = real_houses$LotFrontage))+ geom_histogram (aes(x = f$`4`), fill = "steelblue", alpha = 0.4)
+```
+
+```{r}
+dbb = real_houses %>% filter (rownames(real_houses)%in% rownames(f))
+dbb$LotFrontage = f$`4`
+real_houses = anti_join(real_houses,dbb,  by = "Id")
+real_houses = rbind(real_houses, dbb)
+real_houses = real_houses %>% arrange(Id)
+
+nomiss = as.data.frame(as.numeric(na.omit (real_houses$LotFrontage)))
+real_houses$LotFrontage = str_replace_na(real_houses$LotFrontage, replacement = median (nomiss[,1]))
+sum(is.na(real_houses$LotFrontage))
+real_houses$LotFrontage = as.numeric(real_houses$LotFrontage)
+rm(dbb, f, LF_imputes, nomiss, A, B)
+```
+
+```{r}
+for (i in 2:ncol(real_houses)){
+  n = sum(is.na(real_houses[,i]))
+  if (n != 0)
+  {print (names(real_houses)[i])
+    print (n)}
+}
+```
+
+```{r}
+real_houses = subset (real_houses, select = -c (BsmtQual, BsmtCond, BsmtExposure, BsmtFinType1, BsmtFinType2,GarageType, GarageYrBlt, GarageFinish, GarageQual, GarageCond))
+```
+
+Оставшиеся NA опять таки заменю самым частым значением. 
+
+```{r}
+real_houses$MSZoning = str_replace_na(real_houses$MSZoning, replacement = most_freq(real_houses$MSZoning))
+real_houses$Exterior1st = str_replace_na(real_houses$Exterior1st, replacement = most_freq(real_houses$Exterior1st))
+real_houses$Exterior2nd = str_replace_na(real_houses$Exterior2nd, replacement = most_freq(real_houses$Exterior2nd))
+real_houses$MasVnrType = str_replace_na(real_houses$MasVnrType, replacement = most_freq(real_houses$MasVnrType))
+real_houses$MasVnrArea = str_replace_na(real_houses$MasVnrArea, replacement = most_freq(real_houses$MasVnrArea))
+real_houses$BsmtFinSF1 = str_replace_na(real_houses$BsmtFinSF1, replacement = most_freq(real_houses$BsmtFinSF1))
+real_houses$BsmtFinSF2 = str_replace_na(real_houses$BsmtFinSF2, replacement = most_freq(real_houses$BsmtFinSF2))
+real_houses$BsmtUnfSF = str_replace_na(real_houses$BsmtUnfSF, replacement = most_freq(real_houses$BsmtUnfSF))
+real_houses$TotalBsmtSF = str_replace_na(real_houses$TotalBsmtSF, replacement = most_freq(real_houses$TotalBsmtSF))
+real_houses$BsmtFullBath = str_replace_na(real_houses$BsmtFullBath, replacement = most_freq(real_houses$BsmtFullBath))
+real_houses$BsmtHalfBath = str_replace_na(real_houses$BsmtHalfBath, replacement = most_freq(real_houses$BsmtHalfBath))
+real_houses$KitchenQual = str_replace_na(real_houses$KitchenQual, replacement = most_freq(real_houses$KitchenQual))
+real_houses$Functional = str_replace_na(real_houses$Functional, replacement = most_freq(real_houses$Functional))
+real_houses$GarageCars = str_replace_na(real_houses$GarageCars, replacement = most_freq(real_houses$GarageCars))
+real_houses$GarageArea = str_replace_na(real_houses$GarageArea, replacement = most_freq(real_houses$GarageArea))
+real_houses$SaleType = str_replace_na(real_houses$SaleType, replacement = most_freq(real_houses$SaleType))
+real_houses$Utilities = str_replace_na(real_houses$Utilities, replacement = most_freq(real_houses$Utilities))
+rm(i, n, chrs, chrCols)
+```
+
+```{r}
+real_backup = real_houses
+```
+
+```{r}
+sum(is.na(real_houses))
+```
+Опять все вернулось к character...
+```{r}
+real_houses[,3] = as.factor (real_houses[,3])
+real_houses[,6] = as.factor (real_houses[,6])
+real_houses[,7] = as.factor (real_houses[,7])
+real_houses[,8] = as.factor (real_houses[,8])
+real_houses[,57] = as.factor (real_houses[,57])
+real_houses$Utilities = as.factor (real_houses$Utilities)
+real_houses$LotConfig = as.factor (real_houses$LotConfig)
+real_houses$LandSlope = as.factor (real_houses$LandSlope)
+real_houses$Neighborhood = as.factor (real_houses$Neighborhood)
+real_houses$Condition1 = as.factor (real_houses$Condition1)
+real_houses$Condition2 = as.factor (real_houses$Condition2)
+real_houses$BldgType = as.factor (real_houses$BldgType)
+real_houses$HouseStyle = as.factor (real_houses$HouseStyle)
+real_houses$RoofStyle = as.factor (real_houses$RoofStyle)
+real_houses$RoofMatl = as.factor (real_houses$RoofMatl)
+real_houses$Exterior1st = as.factor (real_houses$Exterior1st)
+real_houses$Exterior2nd = as.factor (real_houses$Exterior2nd)
+real_houses$MasVnrType = as.factor (real_houses$MasVnrType)
+real_houses$ExterQual = as.factor (real_houses$ExterQual)
+real_houses$ExterCond = as.factor (real_houses$ExterCond)
+real_houses$Foundation = as.factor (real_houses$Foundation)
+real_houses$Heating = as.factor (real_houses$Heating)
+real_houses$HeatingQC = as.factor (real_houses$HeatingQC)
+real_houses$CentralAir = as.factor (real_houses$CentralAir)
+real_houses$Electrical = as.factor (real_houses$Electrical)
+real_houses$KitchenQual = as.factor (real_houses$KitchenQual)
+real_houses$Functional = as.factor (real_houses$Functional)
+real_houses$PavedDrive = as.factor (real_houses$PavedDrive)
+real_houses$SaleType = as.factor (real_houses$SaleType)
+real_houses$SaleCondition = as.factor (real_houses$SaleCondition)
+real_houses$MasVnrArea = as.numeric (real_houses$MasVnrArea)
+real_houses$BsmtFinSF1 = as.numeric (real_houses$BsmtFinSF1)
+real_houses$BsmtFinSF2 = as.numeric (real_houses$BsmtFinSF2)
+real_houses$BsmtUnfSF = as.numeric (real_houses$BsmtUnfSF)
+real_houses$TotalBsmtSF = as.numeric (real_houses$TotalBsmtSF)
+real_houses$BsmtFullBath = as.factor (real_houses$BsmtFullBath)
+real_houses$BsmtHalfBath = as.factor (real_houses$BsmtHalfBath)
+real_houses$FireplaceQu = as.factor (real_houses$FireplaceQu)
+real_houses$GarageCars = as.factor (real_houses$GarageCars)
+real_houses$YearBuilt = as.factor (real_houses$YearBuilt)
+real_houses$FullBath = as.factor (real_houses$FullBath)
+real_houses$HalfBath = as.factor (real_houses$HalfBath)
+real_houses$BedroomAbvGr = as.factor (real_houses$BedroomAbvGr)
+real_houses$KitchenAbvGr = as.factor (real_houses$KitchenAbvGr)
+real_houses$YearRemodAdd = as.factor (real_houses$YearRemodAdd)
+real_houses$GarageArea =  as.numeric (real_houses$GarageArea)
+real_houses$OpenPorchSF = as.numeric (real_houses$OpenPorchSF)
+real_houses$BsmtFinSF1 = as.numeric (real_houses$BsmtFinSF1)
+real_houses$YrSold = as.factor (real_houses$YrSold)
+real_backup = real_houses
+```
+
+Убераю выбросы, но так как нельзя их удалять, то я заменил их на максимальное значение + 5-15%.
+
+```{r}
+real_houses$BsmtFinSF1 = case_when(real_houses$BsmtFinSF1 > 3000 ~ 2290, T~real_houses$BsmtFinSF1)
+real_houses$TotalBsmtSF = case_when(real_houses$TotalBsmtSF > 5000 ~ 2650, T~real_houses$TotalBsmtSF)
+real_houses$X1stFlrSF[1090] = 3900
+real_houses$GrLivArea [1090] = 3900
+
+real_houses$WoodDeckSF[1147] = 900
+real_houses$EnclosedPorch[1044] = 600
+real_houses$MiscVal[1090] = 7000
+real_houses$MiscVal[2] = 7000
+```
+
+```{r}
+real_backup = real_houses
+```
+
+К этому моменту я обнаружил, что при переводе в дамми, из таблицы удаляются количественные данные... Исправляюсь. 
+```{r}
+real_houses = real_backup
+
+nums1 <- real_backup[ , purrr::map_lgl(real_backup, is.numeric)]
+nums1 = subset (nums1, select = -c(Id))
+sum(is.na(nums1))
+
+
+
+real_houses = dummy_columns(real_houses,select_columns = NULL, ignore_na = F)
+real_houses = real_houses[ -c(2:66)]
+real_houses = cbind(real_houses, nums1)
+```
+
+Предобработка и импьютинг данных на тестовой выборке закончен и теперь я перехожу непосредственно к предсказательным моделям. 
+
+Из-за перевода в дамми и различий в данных между датасетами, надо сделать было, чтобы в них были соответсвенно одинаковые колонки. Иначе модели не работали. Это я и сделал внутри следующего чанка. 
+
+```{r}
+houses_backup1 = houses_backup
+houses = houses_backup1
+houses = subset (houses, select = -c (BsmtQual, BsmtCond, BsmtExposure, BsmtFinType1, BsmtFinType2,GarageType, GarageYrBlt, GarageFinish, GarageQual, GarageCond))
+
+nums <- houses_backup[ , purrr::map_lgl(houses_backup, is.numeric)]
+nums = subset (nums, select = -c(Id, GarageYrBlt))
+sum(is.na(nums))
+
+houses = dummy_columns(houses,select_columns = NULL, ignore_na = F)
+houses = houses[ -c(2:66)]
+houses = cbind(houses, nums)
+
+common_names <- intersect(names(houses), names(real_houses))
+houses = select(houses, common_names)
+houses$SalePrice = houses_backup$SalePrice
+```
+
+Это модель для предсказания цены, на основе чего будут выделены категории и добавлены в датасет. 
+```{r}
+model = rand_forest(mode = "regression") %>% 
+  set_engine('randomForest')
+set.seed(984845)
+log = workflow() %>% 
+    add_model(model) %>% 
+     add_formula(log(SalePrice)~.-Id) %>% 
+     fit(data = houses)
+
+lr_pred <- predict(log, houses)
+sum(is.na(lr_pred_train))
+rmse_lr <- mean((lr_pred$.pred - log(houses$SalePrice))^2)^(1/2)
+rmse_lr
+lr_pred$.pred = round(exp(lr_pred$.pred), 0)
+```
+
+Применяем к тестовому датасету.
+```{r}
+the_smiths = predict(log, real_houses)
+```
+
+Выделяю категории. 
+
+```{r}
+houses = houses_backup
+houses$price_pred = lr_pred$.pred
+houses$price_cat = case_when (houses$price_pred < 110000 ~ "cheap", houses$price_pred > 110000 & houses$price_pred <  150000 ~ "medium", houses$price_pred > 150000 & houses$price_pred <  210000 ~ "solid", houses$price_pred > 210000 & houses$price_pred <  325000 ~ "expensive",houses$price_pred > 325000 ~ "very expensive", T ~ "ddb" )
+
+houses = subset (houses , select = c(-price_pred))
+houses_backup = houses
+```
+
+И в тестовом. 
+
+```{r}
+real_houses = real_backup
+real_houses$price_pred = round(exp(the_smiths$.pred), 0)
+
+real_houses$price_cat = case_when (real_houses$price_pred < 110000 ~ "cheap", real_houses$price_pred > 110000 & real_houses$price_pred <  150000 ~ "medium", real_houses$price_pred > 150000 & real_houses$price_pred <  210000 ~ "solid", real_houses$price_pred > 210000 & real_houses$price_pred <  325000 ~ "expensive",real_houses$price_pred > 325000 ~ "very expensive", T ~ "ddb" )
+
+real_houses = subset (real_houses , select = c(-price_pred))
+real_backup = real_houses
+```
+
+А вот теперь стоит вспомнить про PCA. Насколько я понял, то коэффициенты переменных в каждой компоненте - это соответсвенно их их коэффициент их корреляции. Поэтому я решил отобрать самые большие по модулю переменные в первой компоненте, чтобы создать переменную то чем больше коэффициент, тем больше он влияет на компоненту. Соответсвенно, я решил неким образом попробовать создать значение прямой PC1 для каждой строчки в датасете - использвал коэфф. вариации, как угловые коэффициенты в прямой - мне показалось, что смысл в этом есть. 
+```{r}
+houses_backup$coeff = (houses_backup$TotalBsmtSF*0.391 + houses_backup$LotFrontage*0.234 + houses_backup$X1stFlrSF*0.391 + houses_backup$GrLivArea*0.356 + houses_backup$GarageArea*0.345 + houses_backup$OverallQual+0.365)
+houses_backup$coeff
+```
+
+И для тестовой. 
+
+```{r}
+real_backup$coeff = (real_backup$TotalBsmtSF*0.391 + real_backup$LotFrontage*0.234 + real_backup$X1stFlrSF*0.391 + real_backup$GrLivArea*0.356 + real_backup$GarageArea*0.345 + real_backup$OverallQual+0.365)
+real_backup$coeff
+```
+
+Теперь все те же шаги при работе с предсказательными моделями, что и раньше. Сейчас будет модель линейной регрессии обучаться на дополненных двумя колонками данных. 
+```{r}
+houses = houses_backup
+houses = subset (houses, select = -c (BsmtQual, BsmtCond, BsmtExposure, BsmtFinType1, BsmtFinType2,GarageType, GarageYrBlt, GarageFinish, GarageQual, GarageCond))
+
+houses = dummy_columns(houses,select_columns = NULL, ignore_na = F)
+houses = houses[ -c(2:66, 68:69)]
+
+nums <- houses_backup[ , purrr::map_lgl(houses_backup, is.numeric)]
+nums = subset (nums, select = -c(Id, GarageYrBlt))
+sum(is.na(nums))
+
+houses = cbind(houses, nums)
+```
+
+```{r}
+real_houses = real_backup
+real_houses = dummy_columns(real_houses,select_columns = NULL, ignore_na = F)
+real_houses = real_houses[ -c(2:68)]
+
+nums1 <- real_backup[ , purrr::map_lgl(real_backup, is.numeric)]
+nums1 = subset (nums1, select = -c(Id))
+sum(is.na(nums1))
+
+real_houses = cbind (real_houses, nums1)
+```
+
+```{r}
+common_names1 <- intersect(names(houses), names(real_houses))
+```
+
+```{r}
+set.seed(1156)
+houses = select(houses, common_names1)
+houses$SalePrice = houses_backup$SalePrice
+ind = initial_split(houses, prop = 0.75)
+houses.train = training (ind)
+houses.test = testing (ind)
+```
+
+```{r}
+set.seed(100100)
+lm.fit <- glm(log(SalePrice)~.-Id, data = houses.train)
+
+lr_pred_train <- predict(lm.fit, houses.train)
+lr_pred_test <- predict(lm.fit, houses.test)
+sum(is.na(lr_pred_train))
+rmse_lrl_train <- mean((lr_pred_train - log(houses.train$SalePrice))^2)^(1/2)
+rmse_lrl_test <- mean((lr_pred_test- log(houses.test$SalePrice))^2)^(1/2)
+rmse_lrl_train
+rmse_lrl_test 
+```
+0.08301888 - тренировочная
+0.1167603 -  тестовая 
+
+Результаты отличные - заканчиваем с работой. 
+```{r}
+real_houses = select(real_houses, common_names1)
+```
+
+```{r}
+mbv = as.data.frame(predict(lm.fit, real_houses))
+sum(is.na(mbv))
+```
+
+Отправляем работу. 
+```{r}
+to_send_log <- data.frame(Id=real_houses$Id, SalePrice = exp(mbv$`predict(lm.fit, real_houses)`))
+write_csv(to_send_log, "to_send_log1.csv")
+```
